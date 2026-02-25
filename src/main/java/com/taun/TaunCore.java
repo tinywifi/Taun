@@ -28,7 +28,7 @@ import java.util.Properties;
 
 public class TaunCore implements ClientModInitializer {
     public static final String MOD_ID = "Taun+++";
-    private static final int CONFIG_VERSION = 14;
+    private static final int CONFIG_VERSION = 15;
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
     
     private static final List<ChatTrigger> triggers = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -69,7 +69,7 @@ public class TaunCore implements ClientModInitializer {
     private static boolean finneganMode = false; // kept for settings migration, no longer used
     private static boolean debugEnabled = false;
     private static long lastEqSwapFireTime = 0;
-    private static final long EQ_SWAP_COOLDOWN_MS = 60 * 1000;
+    private static final long EQ_SWAP_COOLDOWN_MS = 15 * 1000;
     private static boolean isFarming = false;
 
     // ── Dynamic Rest settings ──────────────────────────────────────────────────
@@ -116,24 +116,29 @@ public class TaunCore implements ClientModInitializer {
         if (!isFarming) return; // only sell while farming
         if (!georgeSlugSellEnabled) return; // disabled by /pest georgesell
         int slugs = countSlugsInInventory(client);
+        if (slugs <= 0) return;
         boolean full = isInventoryFull(client);
-        boolean shouldSell = slugs >= SLUG_SELL_THRESHOLD || (full && slugs > 0);
-        if (!shouldSell) return;
+        if (full && slugs < SLUG_SELL_THRESHOLD) {
+            // Inventory full but not enough slugs for threshold — wait for AutoSell to finish
+            if (!slugSellPendingAutoSell) {
+                slugSellPendingAutoSell = true;
+                client.player.sendMessage(Text.literal("§b§lTaun+++ >> §bInventory full, will sell slugs after AutoSell finishes..."), false);
+            }
+            return;
+        }
+        if (slugs < SLUG_SELL_THRESHOLD) return;
+        // Threshold reached — sell immediately
         georgeSlugSellActive = true;
         lastGeorgeSlugSellTime = System.currentTimeMillis();
+        final int slugCount = slugs;
         new Thread(() -> {
             try {
                 MinecraftClient mc = MinecraftClient.getInstance();
                 if (mc.player == null) { georgeSlugSellActive = false; return; }
-                String reason = slugs >= SLUG_SELL_THRESHOLD
-                    ? slugs + " slugs in inventory"
-                    : "inventory full with " + slugs + " slugs";
-                mc.player.sendMessage(Text.literal("§b§lTaun+++ >> §bSelling slugs (" + reason + ")..."), false);
-                // Stop script before selling
+                mc.player.sendMessage(Text.literal("§b§lTaun+++ >> §bSelling slugs (" + slugCount + " slugs in inventory)..."), false);
                 mc.execute(() -> { if (mc.player != null) mc.player.networkHandler.sendChatMessage(".ez-stopscript"); });
                 Thread.sleep(500);
                 triggerGeorgeSlugSell();
-                // Restart script after all slugs sold
                 Thread.sleep(300);
                 mc.execute(() -> { if (mc.player != null) mc.player.networkHandler.sendChatMessage(".ez-startscript netherwart:1"); });
             } catch (Exception e) {
@@ -270,6 +275,7 @@ public class TaunCore implements ClientModInitializer {
     private static final long GEORGE_SLUG_SELL_COOLDOWN_MS = 60_000; // 1 min between sells
     private static final int SLUG_SELL_THRESHOLD = 3; // trigger sell when >= this many slugs
     private static boolean georgeSlugSellEnabled = true; // toggle via /pest georgesell
+    private static volatile boolean slugSellPendingAutoSell = false; // set when inv full, waiting for AutoSell to finish
 
     // Runtime tracking
     private static long nextRestTriggerMs = 0;
@@ -334,6 +340,7 @@ public class TaunCore implements ClientModInitializer {
             waitForChatPhrase = null;
             waitForChatMatched = false;
             georgeSlugSellActive = false;
+            slugSellPendingAutoSell = false;
         });
         
         net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents.ALLOW_CHAT.register((message) -> {
@@ -416,10 +423,32 @@ public class TaunCore implements ClientModInitializer {
                 if (debugEnabled) MinecraftClient.getInstance().player.sendMessage(
                     Text.literal("§c§lTaun+++ >> §7George RING detected, waiting 5s for GUI..."), false);
             }
+
+            // ── AutoSell finished → trigger pending slug sell ─────────────────
+            if (slugSellPendingAutoSell && !georgeSlugSellActive && strippedText.contains("AutoSell script stopped. [Finished]")) {
+                slugSellPendingAutoSell = false;
+                georgeSlugSellActive = true;
+                lastGeorgeSlugSellTime = System.currentTimeMillis();
+                new Thread(() -> {
+                    try {
+                        MinecraftClient mc = MinecraftClient.getInstance();
+                        if (mc.player == null) { georgeSlugSellActive = false; return; }
+                        mc.player.sendMessage(Text.literal("§b§lTaun+++ >> §bAutoSell done, now selling slugs..."), false);
+                        Thread.sleep(500);
+                        triggerGeorgeSlugSell();
+                        Thread.sleep(300);
+                        mc.execute(() -> { if (mc.player != null) mc.player.networkHandler.sendChatMessage(".ez-startscript netherwart:1"); });
+                    } catch (Exception e) {
+                        LOGGER.warn("[SlugSell] AutoSell-triggered sell failed: {}", e.getMessage());
+                    } finally {
+                        georgeSlugSellActive = false;
+                    }
+                }, "taun-slug-sell-autosell").start();
+            }
             
             for (ChatTrigger trigger : triggers) {
                 if (trigger.matches(strippedText)) {
-                    String triggerKey = trigger.getTriggerText();
+                    String triggerKey = trigger.getGroupKey();
                     Long lastTriggered = chatTriggerCooldowns.get(triggerKey);
                     if (lastTriggered != null && (currentTime - lastTriggered) < CHAT_TRIGGER_COOLDOWN) continue;
                     chatTriggerCooldowns.put(triggerKey, currentTime);
@@ -963,6 +992,8 @@ public class TaunCore implements ClientModInitializer {
                     actionList.add(new ChatTrigger.TriggerAction(yaw[0], yaw[1], pitch[0], pitch[1], -10f, -30f, ewDelay));
                 } catch (Exception e) { LOGGER.warn("[ParseActionLine] Could not parse ETHERWARP_TO: '{}'", line); }
             }
+        } else if (line.equals("RODSWAP")) {
+            actionList.add(new ChatTrigger.TriggerAction(ChatTrigger.TriggerAction.Type.RODSWAP, "", "", 0));
         } else if (line.startsWith("EQSWAP:")) {
             String swapStr = line.substring("EQSWAP:".length()).trim();
             long swapDelay = 0;
@@ -1060,7 +1091,7 @@ public class TaunCore implements ClientModInitializer {
         for (String phrase : triggerPhrases) {
             if (phrase == null || phrase.isEmpty()) continue;
             try {
-                ChatTrigger t = new ChatTrigger(phrase, command, commandDelay, keybindActions, blockInputs, blockInputsDelay, blockedCommands, waitOnGuiClosure, waitOnGuiClosureDelay, waitOnGuiOpen, waitOnGuiOpenDelay);
+                ChatTrigger t = new ChatTrigger(phrase, rawTriggerText, command, commandDelay, keybindActions, blockInputs, blockInputsDelay, blockedCommands, waitOnGuiClosure, waitOnGuiClosureDelay, waitOnGuiOpen, waitOnGuiOpenDelay);
                 t.actions.addAll(actionList);
                 triggers.add(t);
             } catch (IllegalArgumentException e) { LOGGER.error("Failed to create trigger '{}' on line {}: {}", phrase, startIndex + 1, e.getMessage()); }
@@ -1306,7 +1337,12 @@ public class TaunCore implements ClientModInitializer {
                         float lp = action.landPitchMin + (float)(Math.random() * (action.landPitchMax - action.landPitchMin));
                         performEtherwarp(y, p, lp);
                     }
-                    case EQSWAP -> performEqSwap(action.value);
+                    case EQSWAP -> {
+                        executeSingleCommand("stats");
+                        Thread.sleep(200);
+                        performEqSwap(action.value);
+                    }
+                    case RODSWAP -> performRodSwap();
                     case IFJACOB_FALSE -> {
                         if (jacobContestActive) {
                             skipToJacobTrue = true; // skip to IFJACOB_TRUE block
@@ -2086,6 +2122,21 @@ public class TaunCore implements ClientModInitializer {
         }).start();
     }
 
+    private static void performRodSwap() throws InterruptedException {
+        int rodSlot = findRodSlotInHotbar(); int farmingSlot = findFarmingToolSlotInHotbar();
+        if (rodSlot == -1 || farmingSlot == -1) return;
+        blockingInputs = true;
+        try {
+            Thread.sleep(250);
+            pressKey(String.valueOf(rodSlot), "@ROD_SLOT");
+            Thread.sleep(275);
+            pressKey("rmb", "rmb");
+            Thread.sleep(250);
+            pressKey(String.valueOf(farmingSlot), "@FARMING_TOOL_SLOT");
+            Thread.sleep(200);
+        } finally { blockingInputs = false; }
+    }
+
     // ── Abiphone / George sell ────────────────────────────────────────────────
 
     /**
@@ -2445,6 +2496,7 @@ public class TaunCore implements ClientModInitializer {
     private static class ChatTrigger {
         private final String triggerText;
         private final String originalTriggerText;
+        private final String groupKey; // shared across all triggers from the same TRIGGER: line
         private final String command;
         private final long delayMs;
         private final List<KeybindAction> keybindActions;
@@ -2462,7 +2514,7 @@ public class TaunCore implements ClientModInitializer {
         }
 
         static class TriggerAction {
-            enum Type { COMMAND, PRESS, HOLD, UNHOLD, ROTATE_TO, ETHERWARP_TO, EQSWAP, IFJACOB_FALSE, IFJACOB_TRUE, WAITFORCHAT, WAITFORJACOBTIMER, IFCROPFEVER_SKIP_GUI, RETRYUNTILSKYBLOCK, WAITONGUIOPEN }
+            enum Type { COMMAND, PRESS, HOLD, UNHOLD, ROTATE_TO, ETHERWARP_TO, EQSWAP, RODSWAP, IFJACOB_FALSE, IFJACOB_TRUE, WAITFORCHAT, WAITFORJACOBTIMER, IFCROPFEVER_SKIP_GUI, RETRYUNTILSKYBLOCK, WAITONGUIOPEN }
             final Type type; final String value; final String originalKey; final long delayMs;
             final float yawMin, yawMax, pitchMin, pitchMax, landPitchMin, landPitchMax; final long rotateDurationMs;
             TriggerAction(Type type, String value, String originalKey, long delayMs) { this.type = type; this.value = value; this.originalKey = originalKey; this.delayMs = delayMs; yawMin = yawMax = pitchMin = pitchMax = landPitchMin = landPitchMax = 0; rotateDurationMs = 0; }
@@ -2487,7 +2539,7 @@ public class TaunCore implements ClientModInitializer {
         public ChatTrigger(String triggerText, String command, long delayMs, String keybind, long keybindDelayMs, boolean blockInputs, long blockInputsDelay) { this(triggerText, command, delayMs, keybind, keybindDelayMs, blockInputs, blockInputsDelay, new ArrayList<>()); }
         public ChatTrigger(String triggerText, String command, long delayMs, String keybind, long keybindDelayMs, boolean blockInputs, long blockInputsDelay, List<BlockedCommand> blockedCommands) {
             if (triggerText == null || triggerText.trim().isEmpty()) throw new IllegalArgumentException("Trigger text cannot be empty");
-            this.originalTriggerText = triggerText; this.triggerText = triggerText.toLowerCase(); this.command = command; this.delayMs = delayMs;
+            this.originalTriggerText = triggerText; this.triggerText = triggerText.toLowerCase(); this.groupKey = triggerText.toLowerCase(); this.command = command; this.delayMs = delayMs;
             this.blockInputs = blockInputs; this.blockInputsDelay = blockInputsDelay; this.blockedCommands = blockedCommands != null ? blockedCommands : new ArrayList<>();
             this.waitOnGuiClosure = false; this.waitOnGuiClosureDelay = 0; this.waitOnGuiOpen = false; this.waitOnGuiOpenDelay = 0;
             this.keybindActions = new ArrayList<>(); this.actions = new ArrayList<>();
@@ -2498,9 +2550,10 @@ public class TaunCore implements ClientModInitializer {
         public ChatTrigger(String triggerText, String command, long delayMs, List<KeybindAction> keybindActions, boolean blockInputs, long blockInputsDelay, List<BlockedCommand> blockedCommands) { this(triggerText, command, delayMs, keybindActions, blockInputs, blockInputsDelay, blockedCommands, false, 0); }
         public ChatTrigger(String triggerText, String command, long delayMs, List<KeybindAction> keybindActions, boolean blockInputs, long blockInputsDelay, List<BlockedCommand> blockedCommands, boolean waitOnGuiClosure, long waitOnGuiClosureDelay) { this(triggerText, command, delayMs, keybindActions, blockInputs, blockInputsDelay, blockedCommands, waitOnGuiClosure, waitOnGuiClosureDelay, false, 0); }
         public ChatTrigger(String triggerText, String command, long delayMs, List<KeybindAction> keybindActions, boolean blockInputs, long blockInputsDelay, List<BlockedCommand> blockedCommands, boolean waitOnGuiClosure, long waitOnGuiClosureDelay, boolean waitOnGuiOpen) { this(triggerText, command, delayMs, keybindActions, blockInputs, blockInputsDelay, blockedCommands, waitOnGuiClosure, waitOnGuiClosureDelay, waitOnGuiOpen, 0); }
-        public ChatTrigger(String triggerText, String command, long delayMs, List<KeybindAction> keybindActions, boolean blockInputs, long blockInputsDelay, List<BlockedCommand> blockedCommands, boolean waitOnGuiClosure, long waitOnGuiClosureDelay, boolean waitOnGuiOpen, long waitOnGuiOpenDelay) {
+        public ChatTrigger(String triggerText, String command, long delayMs, List<KeybindAction> keybindActions, boolean blockInputs, long blockInputsDelay, List<BlockedCommand> blockedCommands, boolean waitOnGuiClosure, long waitOnGuiClosureDelay, boolean waitOnGuiOpen, long waitOnGuiOpenDelay) { this(triggerText, triggerText, command, delayMs, keybindActions, blockInputs, blockInputsDelay, blockedCommands, waitOnGuiClosure, waitOnGuiClosureDelay, waitOnGuiOpen, waitOnGuiOpenDelay); }
+        public ChatTrigger(String triggerText, String groupKey, String command, long delayMs, List<KeybindAction> keybindActions, boolean blockInputs, long blockInputsDelay, List<BlockedCommand> blockedCommands, boolean waitOnGuiClosure, long waitOnGuiClosureDelay, boolean waitOnGuiOpen, long waitOnGuiOpenDelay) {
             if (triggerText == null || triggerText.trim().isEmpty()) throw new IllegalArgumentException("Trigger text cannot be empty");
-            this.originalTriggerText = triggerText; this.triggerText = triggerText.toLowerCase(); this.command = command; this.delayMs = delayMs;
+            this.originalTriggerText = triggerText; this.triggerText = triggerText.toLowerCase(); this.groupKey = (groupKey != null ? groupKey : triggerText).toLowerCase(); this.command = command; this.delayMs = delayMs;
             this.keybindActions = keybindActions; this.blockInputs = blockInputs; this.blockInputsDelay = blockInputsDelay;
             this.blockedCommands = blockedCommands != null ? blockedCommands : new ArrayList<>();
             this.waitOnGuiClosure = waitOnGuiClosure; this.waitOnGuiClosureDelay = waitOnGuiClosureDelay; this.waitOnGuiOpen = waitOnGuiOpen; this.waitOnGuiOpenDelay = waitOnGuiOpenDelay;
@@ -2522,6 +2575,7 @@ public class TaunCore implements ClientModInitializer {
         public boolean shouldWaitOnGuiOpen() { return waitOnGuiOpen; }
         public long getWaitOnGuiOpenDelay() { return waitOnGuiOpenDelay; }
         public String getTriggerText() { return originalTriggerText; }
+        public String getGroupKey() { return groupKey; }
     }
 
     private static class PestCdTrigger {
@@ -2630,7 +2684,7 @@ public class TaunCore implements ClientModInitializer {
         float pitchMax = Math.max(-90f, etherwarpPitch + 10f);
         // format without trailing zeros
         java.util.function.Function<Float, String> fmt = v -> (v == Math.floor(v)) ? String.valueOf((int)(float)v) : String.valueOf(v);
-        return "  ETHERWARP_TO: " + fmt.apply(yawMin) + " - " + fmt.apply(yawMax) + ", " + fmt.apply(pitchMin) + " - " + fmt.apply(pitchMax) + "\n";
+        return "  ETHERWARP_TO: " + fmt.apply(yawMin) + " - " + fmt.apply(yawMax) + ", " + fmt.apply(pitchMin) + " - " + fmt.apply(pitchMax) + " after 100ms\n";
     }
 
     public static void startSetEtherwarpCoords() {
@@ -2690,22 +2744,21 @@ public class TaunCore implements ClientModInitializer {
             switch (mode) {
                 case "rodswap" -> {
                     t.append("# rodswap config\n");
-                    if (eqSwapEnabled) { t.append("EQPestCD:\n  COMMAND: .ez-stopscript\n  COMMAND: /stats\n  EQSWAP: PEST\n  PRESS: @ROD_SLOT after 150ms\n  PRESS: rmb after 200ms\n  PRESS: @FARMING_TOOL_SLOT after 175ms\n  COMMAND: .ez-startscript netherwart:1 after 50ms\n"); }
-                    else { t.append("PestCD:\n  COMMAND: .ez-stopscript\n  PRESS: @ROD_SLOT after 150ms\n  PRESS: rmb after 200ms\n  PRESS: @FARMING_TOOL_SLOT after 175ms\n  COMMAND: .ez-startscript netherwart:1 after 50ms\n"); }
+                    if (eqSwapEnabled) { t.append("EQPestCD:\n  COMMAND: .ez-stopscript\n  EQSWAP: PEST\n  RODSWAP\n  COMMAND: .ez-startscript netherwart:1 after 50ms\n"); }
+                    else { t.append("PestCD:\n  COMMAND: .ez-stopscript\n  RODSWAP\n  COMMAND: .ez-startscript netherwart:1 after 50ms\n"); }
                     t.append("\nTRIGGER: \"spawned in\"\n  COMMAND: .ez-stopscript after 350ms\n");
-                    if (eqSwapEnabled) t.append("  COMMAND: /stats\n  EQSWAP: BLOSSOM/LOTUS\n");
+                    if (eqSwapEnabled) t.append("  EQSWAP: BLOSSOM/LOTUS\n");
                     t.append("  COMMAND: /setspawn\n");
                     if (etherwarpEnabled) t.append(buildEtherwarpLine());
-                    t.append("  COMMAND: .ez-startscript misc:pestCleaner\n\nTRIGGER: \"Pest Cleaner script stopped. [Finished]\"\n  COMMAND: /warp garden\n  HOLD: shift for 350ms\n  PRESS: @ROD_SLOT after 250ms\n  PRESS: rmb after 200ms\n  PRESS: @FARMING_TOOL_SLOT after 175ms\n  COMMAND: .ez-startscript netherwart:1 after 100ms\n");
+                    t.append("  COMMAND: .ez-startscript misc:pestCleaner\n\nTRIGGER: \"Pest Cleaner script stopped. [Finished]\"\n  COMMAND: /warp garden\n  HOLD: shift for 350ms\n  RODSWAP\n  COMMAND: .ez-startscript netherwart:1 after 100ms\n");
                     appendVisitorTriggers(t);
                     appendServerShutdownTrigger(t);
                 }
                 case "wdswap" -> {
                     t.append("# wardrobe swap config\n");
-                    if (eqSwapEnabled) { t.append("EQPestCD:\n  COMMAND: .ez-stopscript\n  COMMAND: /stats\n  EQSWAP: PEST\n  COMMAND: .ez-startscript misc:wardrobeSwap\n  WAITONGUIOPEN after 500ms\n  COMMAND: .ez-startscript netherwart:1\n\n"); }
-                    t.append("TRIGGER: \"spawned in\"\n  IFCROPFEVER: SKIP_GUI\n  WAITONGUIOPEN\n  COMMAND: .ez-stopscript\n");
-                    if (eqSwapEnabled) t.append("  COMMAND: /stats\n  EQSWAP: BLOSSOM/LOTUS\n");
-                    t.append("  COMMAND: /setspawn\n");
+                    if (eqSwapEnabled) { t.append("EQPestCD:\n  COMMAND: .ez-stopscript\n  EQSWAP: PEST\n  COMMAND: .ez-startscript netherwart:1 after 100ms\n\n"); }
+                    t.append("TRIGGER: \"spawned in\"\n  IFCROPFEVER: SKIP_GUI\n  WAITONGUIOPEN\n  COMMAND: /setspawn\n  COMMAND: .ez-stopscript\n");
+                    if (eqSwapEnabled) t.append("  EQSWAP: BLOSSOM/LOTUS\n");
                     if (etherwarpEnabled) t.append(buildEtherwarpLine());
                     t.append("  COMMAND: .ez-startscript misc:pestCleaner\n\nTRIGGER: \"Pest Cleaner script stopped. [Finished]\"\n  COMMAND: /warp garden\n  HOLD: shift for 350ms\n  COMMAND: .ez-startscript netherwart:1\n");
                     appendVisitorTriggers(t);
@@ -2713,9 +2766,9 @@ public class TaunCore implements ClientModInitializer {
                 }
                 default -> {
                     t.append("# none config\n");
-                    if (eqSwapEnabled) { t.append("EQPestCD:\n  COMMAND: .ez-stopscript\n  COMMAND: /stats\n  EQSWAP: PEST\n  COMMAND: .ez-startscript netherwart:1 after 50ms\n\n"); }
+                    if (eqSwapEnabled) { t.append("EQPestCD:\n  COMMAND: .ez-stopscript\n  EQSWAP: PEST\n  COMMAND: .ez-startscript netherwart:1 after 50ms\n\n"); }
                     t.append("TRIGGER: \"spawned in\"\n  COMMAND: .ez-stopscript\n");
-                    if (eqSwapEnabled) t.append("  COMMAND: /stats\n  EQSWAP: BLOSSOM/LOTUS\n");
+                    if (eqSwapEnabled) t.append("  EQSWAP: BLOSSOM/LOTUS\n");
                     t.append("  COMMAND: /setspawn\n");
                     if (etherwarpEnabled) t.append(buildEtherwarpLine());
                     t.append("  COMMAND: .ez-startscript misc:pestCleaner\n\nTRIGGER: \"Pest Cleaner script stopped. [Finished]\"\n  COMMAND: /warp garden\n  HOLD: shift for 350ms\n  COMMAND: .ez-startscript netherwart:1\n");
