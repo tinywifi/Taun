@@ -375,7 +375,7 @@ public class TaunCore implements ClientModInitializer {
                     long farmMinutes = restScriptingTime + offset;
                     nextRestTriggerMs = System.currentTimeMillis() + farmMinutes * 60_000L;
                     MinecraftClient.getInstance().player.sendMessage(
-                        Text.literal("§c§lTaun+++ >> §6Dynamic Rest: next break in §e" + farmMinutes + "m"), false);
+                        Text.literal("§c§lTaun+++ >> §7Dynamic Rest: next break in §e" + farmMinutes + "m"), false);
                 }
                 if (eqSwapPending && eqSwapEnabled) {
                     boolean fresh = (System.currentTimeMillis() - lastEqSwapFireTime) < (3 * 60 * 1000);
@@ -688,11 +688,11 @@ public class TaunCore implements ClientModInitializer {
             long farmMinutes = restScriptingTime + offset;
             nextRestTriggerMs = System.currentTimeMillis() + farmMinutes * 60_000L;
             client.player.sendMessage(
-                Text.literal("§c§lTaun+++ >> §6Dynamic Rest: next break in §e" + farmMinutes + "m"), false);
+                Text.literal("§c§lTaun+++ >> §7Dynamic Rest: next break in §e" + farmMinutes + "m"), false);
         }
         saveSettings();
         client.player.sendMessage(
-            Text.literal("§c§lTaun+++ >> §6Dynamic Rest: " + (dynamicRestEnabled ? "§aENABLED" : "§cDISABLED")), false);
+            Text.literal("§c§lTaun+++ >> §7Dynamic Rest: " + (dynamicRestEnabled ? "§aENABLED" : "§cDISABLED")), false);
     }
 
     public static void toggleDynamicRest() {
@@ -2702,7 +2702,7 @@ public class TaunCore implements ClientModInitializer {
                 }
                 case "wdswap" -> {
                     t.append("# wardrobe swap config\n");
-                    if (eqSwapEnabled) { t.append("EQPestCD:\n  COMMAND: .ez-stopscript\n  COMMAND: /stats\n  EQSWAP: PEST\n  WAITONGUIOPEN\n  COMMAND: .ez-startscript misc:wardrobeSwap\n  WAITONGUIOPEN\n  COMMAND: .ez-startscript netherwart:1\n\n"); }
+                    if (eqSwapEnabled) { t.append("EQPestCD:\n  COMMAND: .ez-stopscript\n  COMMAND: /stats\n  EQSWAP: PEST\n  COMMAND: .ez-startscript misc:wardrobeSwap\n  WAITONGUIOPEN after 500ms\n  COMMAND: .ez-startscript netherwart:1\n\n"); }
                     t.append("TRIGGER: \"spawned in\"\n  IFCROPFEVER: SKIP_GUI\n  WAITONGUIOPEN\n  COMMAND: .ez-stopscript\n");
                     if (eqSwapEnabled) t.append("  COMMAND: /stats\n  EQSWAP: BLOSSOM/LOTUS\n");
                     t.append("  COMMAND: /setspawn\n");
