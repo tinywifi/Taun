@@ -263,7 +263,7 @@ public class TaunCore implements ClientModInitializer {
 
     private static boolean boosterCookieEnabled = true;
     private static final java.util.List<String> BOOSTER_COOKIE_ITEMS = java.util.List.of(
-        "wriggling larva", "chirping stereo", "mantid claw", "overclocker"
+        "wriggling larva", "chirping stereo", "mantid claw", "overclocker", "chip"
     );
 
     private static void triggerBoosterCookie() throws InterruptedException {
@@ -301,36 +301,49 @@ public class TaunCore implements ClientModInitializer {
         }
         Thread.sleep(300); // let slots populate
 
-        // Shift-click each target item
+        // Shift-click each target item (player inventory slots only, all stacks)
         boolean foundAny = false;
         for (String targetName : BOOSTER_COOKIE_ITEMS) {
-            java.util.concurrent.atomic.AtomicInteger itemSlot = new java.util.concurrent.atomic.AtomicInteger(-1);
-            java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-            mc.execute(() -> {
-                try {
-                    if (mc.player.currentScreenHandler != null) {
-                        var slots = mc.player.currentScreenHandler.slots;
-                        for (int i = 0; i < slots.size(); i++) {
-                            var slot = slots.get(i);
-                            if (!slot.hasStack()) continue;
-                            String name = slot.getStack().getName().getString().replaceAll("§.", "").toLowerCase();
-                            if (name.contains(targetName)) { itemSlot.set(i); break; }
-                        }
-                    }
-                } finally { latch.countDown(); }
-            });
-            latch.await();
-
-            if (itemSlot.get() != -1) {
-                final int s = itemSlot.get();
-                if (debugEnabled) mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Shift-clicking " + targetName + " at slot " + s), false);
+            boolean foundMore = true;
+            while (foundMore) {
+                java.util.concurrent.atomic.AtomicInteger itemSlot = new java.util.concurrent.atomic.AtomicInteger(-1);
+                java.util.concurrent.atomic.AtomicInteger itemCount = new java.util.concurrent.atomic.AtomicInteger(0);
+                java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
                 mc.execute(() -> {
-                    if (mc.player.currentScreenHandler != null)
-                        mc.interactionManager.clickSlot(mc.player.currentScreenHandler.syncId, s, 0,
-                            net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, mc.player);
+                    try {
+                        if (mc.player.currentScreenHandler != null) {
+                            var slots = mc.player.currentScreenHandler.slots;
+                            int total = slots.size();
+                            // Player inventory is always the last 36 slots (27 inv + 9 hotbar)
+                            int invStart = total - 36;
+                            for (int i = invStart; i < total; i++) {
+                                var slot = slots.get(i);
+                                if (!slot.hasStack()) continue;
+                                String name = slot.getStack().getName().getString().replaceAll("§.", "").toLowerCase();
+                                if (name.contains(targetName)) { itemSlot.set(i); itemCount.set(slot.getStack().getCount()); break; }
+                            }
+                        }
+                    } finally { latch.countDown(); }
                 });
-                foundAny = true;
-                Thread.sleep(300);
+                latch.await();
+
+                if (itemSlot.get() != -1) {
+                    final int s = itemSlot.get();
+                    final int count = itemCount.get();
+                    if (debugEnabled) mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Shift-clicking " + targetName + " x" + count + " at slot " + s), false);
+                    for (int c = 0; c < count; c++) {
+                        mc.execute(() -> {
+                            if (mc.player.currentScreenHandler != null)
+                                mc.interactionManager.clickSlot(mc.player.currentScreenHandler.syncId, s, 0,
+                                    net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, mc.player);
+                        });
+                        Thread.sleep(600);
+                    }
+                    foundAny = true;
+                    Thread.sleep(400);
+                } else {
+                    foundMore = false;
+                }
             }
         }
 
@@ -486,23 +499,20 @@ public class TaunCore implements ClientModInitializer {
             } else if (strippedText.contains("(S-Shape) script stopped.")) {
                 isFarming = false;
                 if (debugEnabled) MinecraftClient.getInstance().player.sendMessage(Text.literal("§c§lTaun+++ >> §7Farming: §cfalse"), false);
-            } else if (strippedText.contains("AutoSell script stopped. [Finished]") && georgeSlugSellEnabled && !georgeSlugSellActive
+            } else if (strippedText.contains("AutoSell script stopped. [Finished]") && !georgeSlugSellActive
                     && (System.currentTimeMillis() - lastGeorgeSlugSellTime) > GEORGE_SLUG_SELL_COOLDOWN_MS) {
                 MinecraftClient mc2 = MinecraftClient.getInstance();
                 int slugCount = countSlugsInInventory(mc2);
-                if (slugCount > 0) {
+                boolean hasSlugs = georgeSlugSellEnabled && slugCount > 0;
+                boolean hasBoosterItems = boosterCookieEnabled;
+                if (hasSlugs || hasBoosterItems) {
                     georgeSlugSellActive = true;
                     lastGeorgeSlugSellTime = System.currentTimeMillis();
                     new Thread(() -> {
                         try {
                             if (mc2.player == null) { georgeSlugSellActive = false; return; }
-                            mc2.player.sendMessage(Text.literal("§c§lTaun+++ >> §7AutoSell done, selling " + slugCount + " slugs..."), false);
-                            // Start the script back up, wait for it to register, then stop it and call george
-                            mc2.execute(() -> { if (mc2.player != null) mc2.player.networkHandler.sendChatMessage(".ez-startscript netherwart:1"); });
-                            Thread.sleep(2000);
-                            mc2.execute(() -> { if (mc2.player != null) mc2.player.networkHandler.sendChatMessage(".ez-stopscript"); });
-                            Thread.sleep(500);
-                            triggerGeorgeSlugSell();
+                            mc2.player.sendMessage(Text.literal("§c§lTaun+++ >> §7AutoSell done, running sell sequence..."), false);
+                            if (hasSlugs) triggerGeorgeSlugSell();
                             Thread.sleep(300);
                             triggerBoosterCookie();
                             mc2.execute(() -> { if (mc2.player != null) mc2.player.networkHandler.sendChatMessage(".ez-startscript netherwart:1"); });
