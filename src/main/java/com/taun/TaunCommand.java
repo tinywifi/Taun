@@ -134,6 +134,21 @@ public class TaunCommand {
                     .then(ClientCommandManager.literal("extrasell")
                         .executes(ctx -> { TaunCore.toggleExtraSell(); return 1; })
                     )
+                    // /pest visitor — toggle visitor detection on/off
+                    .then(ClientCommandManager.literal("visitor")
+                        .executes(ctx -> { TaunCore.toggleVisitorDetection(); return 1; })
+                        .then(ClientCommandManager.literal("threshold")
+                            .then(ClientCommandManager.argument("count", IntegerArgumentType.integer(1, 6))
+                                .executes(ctx -> {
+                                    TaunCore.setVisitorThreshold(IntegerArgumentType.getInteger(ctx, "count"));
+                                    return 1;
+                                })
+                            )
+                        )
+                        .then(ClientCommandManager.literal("status")
+                            .executes(ctx -> { TaunCore.showVisitorStatus(); return 1; })
+                        )
+                    )
             );
         });
     }

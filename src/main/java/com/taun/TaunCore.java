@@ -72,6 +72,13 @@ public class TaunCore implements ClientModInitializer {
     private static final long EQ_SWAP_COOLDOWN_MS = 15 * 1000;
     private static boolean isFarming = false;
 
+    // ── Visitor detection settings ───────────────────────────────────────────────
+    private static boolean visitorDetectionEnabled = false;
+    private static int visitorThreshold = 5;
+    private static int lastVisitorCount = -1;
+    private static volatile boolean handlingVisitors = false;
+    private static final java.util.regex.Pattern VISITORS_PATTERN = java.util.regex.Pattern.compile("Visitors:\\s*\\(?(\\d+)\\)?", java.util.regex.Pattern.CASE_INSENSITIVE);
+
     // ── Dynamic Rest settings ──────────────────────────────────────────────────
     private static boolean dynamicRestEnabled = false;
     private static int restScriptingTime = 30;
@@ -541,6 +548,13 @@ public class TaunCore implements ClientModInitializer {
                 georgeRingDetected = true;
             }
 
+            // ── Visitor script finished detection ───────────────────────────────
+            // Note: taunahi visitor script handles auto-return, so we just clear the flag
+            if (handlingVisitors && strippedText.contains("Visitor script stopped")) {
+                handlingVisitors = false;
+                LOGGER.info("[Visitor] Visitor script finished");
+            }
+
             for (ChatTrigger trigger : triggers) {
                 if (trigger.matches(strippedText)) {
                     String triggerKey = trigger.getGroupKey();
@@ -673,6 +687,9 @@ public class TaunCore implements ClientModInitializer {
             if (client.player != null && chatTriggersEnabled) {
                 checkPestCooldown(client);
                 checkPestAlive(client);
+            }
+            if (client.player != null && visitorDetectionEnabled && isFarming && !handlingVisitors) {
+                checkVisitors(client);
             }
             if (client.player != null && isFarming && !georgeSlugSellActive) {
                 slugCheckTickCounter++;
@@ -908,6 +925,8 @@ public class TaunCore implements ClientModInitializer {
             restScriptingTimeOffset = Integer.parseInt(props.getProperty("restScriptingTimeOffset", "3"));
             restBreakTime = Integer.parseInt(props.getProperty("restBreakTime", "10"));            abiphoneSlot = Integer.parseInt(props.getProperty("abiphoneSlot", "0"));
             georgeSlugSellEnabled = Boolean.parseBoolean(props.getProperty("georgeSlugSellEnabled", "true"));
+            visitorDetectionEnabled = Boolean.parseBoolean(props.getProperty("visitorDetectionEnabled", "false"));
+            visitorThreshold = Integer.parseInt(props.getProperty("visitorThreshold", "5"));
             long savedTriggerMs = Long.parseLong(props.getProperty("nextRestTriggerMs", "0"));
             nextRestTriggerMs = (savedTriggerMs > System.currentTimeMillis()) ? savedTriggerMs : 0;
             if (rodswapEnabled && wardrobeSwapEnabled) {
@@ -947,6 +966,8 @@ public class TaunCore implements ClientModInitializer {
             props.setProperty("nextRestTriggerMs", String.valueOf(nextRestTriggerMs));
             props.setProperty("abiphoneSlot", String.valueOf(abiphoneSlot));
             props.setProperty("georgeSlugSellEnabled", String.valueOf(georgeSlugSellEnabled));
+            props.setProperty("visitorDetectionEnabled", String.valueOf(visitorDetectionEnabled));
+            props.setProperty("visitorThreshold", String.valueOf(visitorThreshold));
             props.setProperty("configVersion", String.valueOf(CONFIG_VERSION));
             props.store(Files.newBufferedWriter(settingsPath), "Taun+++ Settings - auto-generated");
             LOGGER.info("Settings saved");
@@ -2039,6 +2060,32 @@ public class TaunCore implements ClientModInitializer {
         client.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Extra sell (overclocker etc): " + (boosterCookieEnabled ? "§aENABLED" : "§cDISABLED")), false);
     }
 
+    public static void toggleVisitorDetection() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) return;
+        visitorDetectionEnabled = !visitorDetectionEnabled;
+        lastVisitorCount = -1;
+        saveSettings();
+        client.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Visitor Detection: " + (visitorDetectionEnabled ? "§aENABLED" : "§cDISABLED")), false);
+    }
+
+    public static void setVisitorThreshold(int count) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) return;
+        if (count < 1 || count > 6) { client.player.sendMessage(Text.literal("§c§lTaun+++ >> §cInvalid value. Must be between 1 and 6."), false); return; }
+        visitorThreshold = count;
+        saveSettings();
+        client.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Visitor threshold set to §e" + count), false);
+    }
+
+    public static void showVisitorStatus() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) return;
+        client.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Visitor Detection Status:"), false);
+        client.player.sendMessage(Text.literal("  §7Enabled:   " + (visitorDetectionEnabled ? "§ayes" : "§cno")), false);
+        client.player.sendMessage(Text.literal("  §7Threshold: §e" + visitorThreshold + " §7visitors"), false);
+    }
+
     public static void setRotateSpeed(long ms) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return;
@@ -2221,6 +2268,69 @@ public class TaunCore implements ClientModInitializer {
         int prev = lastPestAliveCount; lastPestAliveCount = count;
         if (prev == -1 || inGrace) return;
         for (PestAliveTrigger t : pestAliveTriggers) { if (prev < t.threshold && count >= t.threshold) firePestAliveTrigger(t); }
+    }
+
+    private static int getVisitorCount(MinecraftClient client) {
+        if (client.player == null || client.player.networkHandler == null) return 0;
+        try {
+            var players = client.player.networkHandler.getPlayerList();
+            for (var info : players) {
+                if (info.getDisplayName() == null) continue;
+                String name = info.getDisplayName().getString();
+                String clean = name.replaceAll("(?i)§[0-9a-fk-or]", "").trim();
+                java.util.regex.Matcher m = VISITORS_PATTERN.matcher(clean);
+                if (m.find()) {
+                    return Integer.parseInt(m.group(1));
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.warn("[Visitor] Error getting visitor count: {}", e.getMessage());
+        }
+        return 0;
+    }
+
+    private static void checkVisitors(MinecraftClient client) {
+        boolean inGrace = worldJoinTime > 0 && (System.currentTimeMillis() - worldJoinTime) < WORLD_JOIN_GRACE_MS;
+        if (inGrace) return;
+        
+        int count = getVisitorCount(client);
+        int prev = lastVisitorCount;
+        lastVisitorCount = count;
+        
+        if (prev == -1 || prev >= visitorThreshold) return;
+        if (count >= visitorThreshold) {
+            handleVisitorsDetected(client, count);
+        }
+    }
+
+    private static void handleVisitorsDetected(MinecraftClient client, int count) {
+        handlingVisitors = true;
+        final int visitorCount = count;
+        new Thread(() -> {
+            try {
+                MinecraftClient mc = MinecraftClient.getInstance();
+                mc.execute(() -> {
+                    if (mc.player != null) {
+                        mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §dVisitor Threshold Met (" + visitorCount + "). Redirecting to Visitors..."), false);
+                    }
+                });
+                Thread.sleep(100);
+                mc.execute(() -> {
+                    if (mc.player != null) mc.player.networkHandler.sendChatCommand("setspawn");
+                });
+                Thread.sleep(500);
+                mc.execute(() -> {
+                    if (mc.player != null) mc.player.networkHandler.sendChatMessage(".ez-stopscript");
+                });
+                Thread.sleep(100);
+                mc.execute(() -> {
+                    if (mc.player != null) mc.player.networkHandler.sendChatMessage(".ez-startscript misc:visitor");
+                });
+                LOGGER.info("[Visitor] Visitors detected ({}), started visitor script", visitorCount);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, "taun-visitor-detect").start();
     }
 
     private static void firePestAliveTrigger(PestAliveTrigger trigger) {
