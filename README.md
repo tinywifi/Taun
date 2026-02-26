@@ -20,6 +20,7 @@ rodswap rules
 on rod cast summon mooshroom except if you have mooshroom summoned or if you have mosquito summoned (farming crops)  
 on rod cast summon mosquito except if you have mosquito summoned or if you have hedgehog summoned (spawning pests)  
 on enter combat summon hedgehog  
+(killing pests)  
 adding rose dragon mode later. ^  
 
 wardrobe swap rules  
