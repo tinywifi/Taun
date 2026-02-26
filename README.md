@@ -16,14 +16,14 @@ msg @videotaped if u have bugs or ask in taunahi thread
 
 =====================================
 
-rodswap rules
-on rod cast summon mooshroom except if you have mooshroom summoned or if you have mosquito summoned (farming crops)
-on rod cast summon mosquito except if you have mosquito summoned or if you have hedgehog summoned (spawning pests)
-on enter combat summon hedgehog
-adding rose dragon mode later. ^
+rodswap rules  
+on rod cast summon mooshroom except if you have mooshroom summoned or if you have mosquito summoned (farming crops)  
+on rod cast summon mosquito except if you have mosquito summoned or if you have hedgehog summoned (spawning pests)  
+on enter combat summon hedgehog  
+adding rose dragon mode later. ^  
 
-wardrobe swap rules
-on equip mossy helianthus, equip hedgehog
-on equip mantid helianthusm, equip mosquito
-on gain collection (crop that you are farming), equip mooshroom cow
-(u can also add on enter combat equip rosedrag in case you kill a pest that has the same collection as your crop)
+wardrobe swap rules  
+on equip mossy helianthus, equip hedgehog  
+on equip mantid helianthusm, equip mosquito  
+on gain collection (crop that you are farming), equip mooshroom cow  
+(u can also add on enter combat equip rosedrag in case you kill a pest that has the same collection as your crop)  
