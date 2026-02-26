@@ -118,14 +118,7 @@ public class TaunCore implements ClientModInitializer {
         int slugs = countSlugsInInventory(client);
         if (slugs <= 0) return;
         boolean full = isInventoryFull(client);
-        if (full && slugs < SLUG_SELL_THRESHOLD) {
-            // Inventory full but not enough slugs for threshold — wait for AutoSell to finish
-            if (!slugSellPendingAutoSell) {
-                slugSellPendingAutoSell = true;
-                client.player.sendMessage(Text.literal("§b§lTaun+++ >> §bInventory full, will sell slugs after AutoSell finishes..."), false);
-            }
-            return;
-        }
+        if (full && slugs < SLUG_SELL_THRESHOLD) return; // inventory full but not enough slugs yet — AutoSell will handle it
         if (slugs < SLUG_SELL_THRESHOLD) return;
         // Threshold reached — sell immediately
         georgeSlugSellActive = true;
@@ -135,11 +128,12 @@ public class TaunCore implements ClientModInitializer {
             try {
                 MinecraftClient mc = MinecraftClient.getInstance();
                 if (mc.player == null) { georgeSlugSellActive = false; return; }
-                mc.player.sendMessage(Text.literal("§b§lTaun+++ >> §bSelling slugs (" + slugCount + " slugs in inventory)..."), false);
+                mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Selling slugs (" + slugCount + " slugs in inventory)..."), false);
                 mc.execute(() -> { if (mc.player != null) mc.player.networkHandler.sendChatMessage(".ez-stopscript"); });
                 Thread.sleep(500);
                 triggerGeorgeSlugSell();
                 Thread.sleep(300);
+                triggerBoosterCookie();
                 mc.execute(() -> { if (mc.player != null) mc.player.networkHandler.sendChatMessage(".ez-startscript netherwart:1"); });
             } catch (Exception e) {
                 LOGGER.warn("[SlugSell] Failed: {}", e.getMessage());
@@ -205,16 +199,113 @@ public class TaunCore implements ClientModInitializer {
 
             // Shift-click the slug to bring up confirm screen
             final int ss = slugSlot.get();
+            var originalHandler = mc.player.currentScreenHandler; // capture BEFORE queuing click
             mc.execute(() -> {
                 if (mc.player.currentScreenHandler != null)
                     mc.interactionManager.clickSlot(mc.player.currentScreenHandler.syncId, ss, 0,
                         net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, mc.player);
             });
-            Thread.sleep(400);
 
-            // Find and click lime_concrete confirm button
-            java.util.concurrent.atomic.AtomicInteger greenSlot = new java.util.concurrent.atomic.AtomicInteger(-1);
-            java.util.concurrent.CountDownLatch greenLatch = new java.util.concurrent.CountDownLatch(1);
+            // Wait for the confirm screen to open (screen handler changes)
+            long confirmDeadline = System.currentTimeMillis() + 1000;
+            while (mc.player.currentScreenHandler == originalHandler && System.currentTimeMillis() < confirmDeadline) Thread.sleep(50);
+            Thread.sleep(300); // let slots populate
+
+            // Click the green confirm button twice (2 confirmations), 1s apart
+            boolean confirmFailed = false;
+            for (int confirmation = 0; confirmation < 2; confirmation++) {
+                java.util.concurrent.atomic.AtomicInteger greenSlot = new java.util.concurrent.atomic.AtomicInteger(-1);
+                java.util.concurrent.CountDownLatch greenLatch = new java.util.concurrent.CountDownLatch(1);
+                mc.execute(() -> {
+                    try {
+                        if (mc.player.currentScreenHandler != null) {
+                            var slots = mc.player.currentScreenHandler.slots;
+                            for (int i = 0; i < slots.size(); i++) {
+                                var slot = slots.get(i);
+                                if (!slot.hasStack()) continue;
+                                String itemId = net.minecraft.registry.Registries.ITEM.getId(slot.getStack().getItem()).toString().toLowerCase();
+                                String itemName = slot.getStack().getName().getString().replaceAll("§.", "").toLowerCase();
+                                if (itemId.contains("lime") || itemId.contains("green") || itemId.contains("terracotta") || itemName.contains("confirm") || itemName.contains("yes") || itemName.contains("accept") || itemName.contains("click to accept")) {
+                                    greenSlot.set(i); break;
+                                }
+                            }
+                        }
+                    } finally { greenLatch.countDown(); }
+                });
+                greenLatch.await();
+
+                if (greenSlot.get() != -1) {
+                    final int gs = greenSlot.get();
+                    if (debugEnabled) mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Confirm " + (confirmation + 1) + " at slot " + gs), false);
+                    mc.execute(() -> {
+                        if (mc.player.currentScreenHandler != null)
+                            mc.interactionManager.clickSlot(mc.player.currentScreenHandler.syncId, gs, 0,
+                                net.minecraft.screen.slot.SlotActionType.PICKUP, mc.player);
+                    });
+                    if (confirmation == 0) Thread.sleep(1000); // wait 1s before second confirmation
+                } else {
+                    LOGGER.warn("[SlugSell] No confirm button found on confirmation {} — stopping", confirmation + 1);
+                    mc.execute(() -> { if (mc.currentScreen != null) mc.currentScreen.close(); });
+                    confirmFailed = true;
+                    break;
+                }
+            }
+            if (confirmFailed) break;
+            // Wait for GUI to close before looping
+            long closeDeadline = System.currentTimeMillis() + 3000;
+            while (mc.currentScreen != null && System.currentTimeMillis() < closeDeadline) Thread.sleep(100);
+        }
+
+        georgeRingDetected = false;
+        if (mc.player != null) mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Slug sell complete!"), false);
+        LOGGER.info("[SlugSell] Sell sequence complete.");
+    }
+
+    private static boolean boosterCookieEnabled = true;
+    private static final java.util.List<String> BOOSTER_COOKIE_ITEMS = java.util.List.of(
+        "wriggling larva", "chirping stereo", "mantid claw", "overclocker"
+    );
+
+    private static void triggerBoosterCookie() throws InterruptedException {
+        if (!boosterCookieEnabled) return;
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null) return;
+
+        // Check if any target items are in inventory before opening GUI
+        boolean hasItems = false;
+        if (mc.player != null) {
+            for (int i = 0; i < 36; i++) {
+                var stack = mc.player.getInventory().getStack(i);
+                if (stack.isEmpty()) continue;
+                String name = stack.getName().getString().replaceAll("§.", "").toLowerCase();
+                for (String target : BOOSTER_COOKIE_ITEMS) {
+                    if (name.contains(target)) { hasItems = true; break; }
+                }
+                if (hasItems) break;
+            }
+        }
+        if (!hasItems) {
+            if (debugEnabled) mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7No booster cookie items in inventory, skipping"), false);
+            return;
+        }
+
+        mc.execute(() -> { if (mc.player != null) mc.player.networkHandler.sendChatCommand("boostercookie"); });
+        if (debugEnabled) mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Opened /boostercookie, scanning for items..."), false);
+
+        // Wait for GUI to open
+        long guiDeadline = System.currentTimeMillis() + 5000;
+        while (mc.currentScreen == null && System.currentTimeMillis() < guiDeadline) Thread.sleep(100);
+        if (mc.currentScreen == null) {
+            LOGGER.warn("[BoosterCookie] No GUI appeared — skipping");
+            return;
+        }
+        Thread.sleep(300); // let slots populate
+
+        // Shift-click each target item
+        boolean foundAny = false;
+        for (String targetName : BOOSTER_COOKIE_ITEMS) {
+            java.util.concurrent.atomic.AtomicInteger itemSlot = new java.util.concurrent.atomic.AtomicInteger(-1);
+            java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
             mc.execute(() -> {
                 try {
                     if (mc.player.currentScreenHandler != null) {
@@ -222,44 +313,35 @@ public class TaunCore implements ClientModInitializer {
                         for (int i = 0; i < slots.size(); i++) {
                             var slot = slots.get(i);
                             if (!slot.hasStack()) continue;
-                            String itemId = net.minecraft.registry.Registries.ITEM.getId(slot.getStack().getItem()).toString().toLowerCase();
-                            String itemName = slot.getStack().getName().getString().replaceAll("§.", "").toLowerCase();
-                            if (itemId.equals("minecraft:lime_concrete") || itemName.contains("confirm") || itemName.contains("yes")) {
-                                greenSlot.set(i); break;
-                            }
+                            String name = slot.getStack().getName().getString().replaceAll("§.", "").toLowerCase();
+                            if (name.contains(targetName)) { itemSlot.set(i); break; }
                         }
                     }
-                } finally { greenLatch.countDown(); }
+                } finally { latch.countDown(); }
             });
-            greenLatch.await();
+            latch.await();
 
-            if (greenSlot.get() != -1) {
-                final int gs = greenSlot.get();
-                if (debugEnabled) mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Confirming slug sale at slot " + gs), false);
+            if (itemSlot.get() != -1) {
+                final int s = itemSlot.get();
+                if (debugEnabled) mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Shift-clicking " + targetName + " at slot " + s), false);
                 mc.execute(() -> {
                     if (mc.player.currentScreenHandler != null)
-                        mc.interactionManager.clickSlot(mc.player.currentScreenHandler.syncId, gs, 0,
-                            net.minecraft.screen.slot.SlotActionType.PICKUP, mc.player);
+                        mc.interactionManager.clickSlot(mc.player.currentScreenHandler.syncId, s, 0,
+                            net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, mc.player);
                 });
+                foundAny = true;
                 Thread.sleep(300);
-                mc.execute(() -> {
-                    if (mc.player.currentScreenHandler != null)
-                        mc.interactionManager.clickSlot(mc.player.currentScreenHandler.syncId, gs, 0,
-                            net.minecraft.screen.slot.SlotActionType.PICKUP, mc.player);
-                });
-                // Wait for GUI to close before looping
-                long closeDeadline = System.currentTimeMillis() + 3000;
-                while (mc.currentScreen != null && System.currentTimeMillis() < closeDeadline) Thread.sleep(100);
-            } else {
-                LOGGER.warn("[SlugSell] No confirm button found — stopping");
-                mc.execute(() -> { if (mc.currentScreen != null) mc.currentScreen.close(); });
-                break;
             }
         }
 
-        georgeRingDetected = false;
-        if (mc.player != null) mc.player.sendMessage(Text.literal("§b§lTaun+++ >> §aSlug sell complete!"), false);
-        LOGGER.info("[SlugSell] Sell sequence complete.");
+        if (!foundAny) {
+            if (debugEnabled) mc.player.sendMessage(Text.literal("§c§lTaun+++ >> §7No booster cookie items found in GUI"), false);
+        }
+
+        // Close the GUI
+        Thread.sleep(200);
+        mc.execute(() -> { if (mc.currentScreen != null) mc.currentScreen.close(); });
+        Thread.sleep(300);
     }
 
     // ── Abiphone / George sell ─────────────────────────────────────────────────
@@ -275,7 +357,6 @@ public class TaunCore implements ClientModInitializer {
     private static final long GEORGE_SLUG_SELL_COOLDOWN_MS = 60_000; // 1 min between sells
     private static final int SLUG_SELL_THRESHOLD = 3; // trigger sell when >= this many slugs
     private static boolean georgeSlugSellEnabled = true; // toggle via /pest georgesell
-    private static volatile boolean slugSellPendingAutoSell = false; // set when inv full, waiting for AutoSell to finish
 
     // Runtime tracking
     private static long nextRestTriggerMs = 0;
@@ -289,6 +370,7 @@ public class TaunCore implements ClientModInitializer {
     private static volatile String waitForChatPhrase = null;
     private static volatile boolean waitForChatMatched = false;
     private static final List<PestCdTrigger> eqPestCdTriggers = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private static final List<PestCdTrigger> eqPestCdWdTriggers = new java.util.concurrent.CopyOnWriteArrayList<>();
     
     private static final List<PestAliveTrigger> pestAliveTriggers = new java.util.concurrent.CopyOnWriteArrayList<>();
     private static int lastPestAliveCount = -1;
@@ -340,7 +422,6 @@ public class TaunCore implements ClientModInitializer {
             waitForChatPhrase = null;
             waitForChatMatched = false;
             georgeSlugSellActive = false;
-            slugSellPendingAutoSell = false;
         });
         
         net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents.ALLOW_CHAT.register((message) -> {
@@ -353,11 +434,12 @@ public class TaunCore implements ClientModInitializer {
         
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (overlay) return;
-            if (!chatTriggersEnabled) return;
-            
+
             String chatText = message.getString();
             long currentTime = System.currentTimeMillis();
             String strippedText = chatText.replaceAll("§.", "");
+
+            if (!chatTriggersEnabled) return;
             
             int receivedCount = strippedText.split("Received:", -1).length - 1;
             if (receivedCount > 3) return;
@@ -404,6 +486,33 @@ public class TaunCore implements ClientModInitializer {
             } else if (strippedText.contains("(S-Shape) script stopped.")) {
                 isFarming = false;
                 if (debugEnabled) MinecraftClient.getInstance().player.sendMessage(Text.literal("§c§lTaun+++ >> §7Farming: §cfalse"), false);
+            } else if (strippedText.contains("AutoSell script stopped. [Finished]") && georgeSlugSellEnabled && !georgeSlugSellActive
+                    && (System.currentTimeMillis() - lastGeorgeSlugSellTime) > GEORGE_SLUG_SELL_COOLDOWN_MS) {
+                MinecraftClient mc2 = MinecraftClient.getInstance();
+                int slugCount = countSlugsInInventory(mc2);
+                if (slugCount > 0) {
+                    georgeSlugSellActive = true;
+                    lastGeorgeSlugSellTime = System.currentTimeMillis();
+                    new Thread(() -> {
+                        try {
+                            if (mc2.player == null) { georgeSlugSellActive = false; return; }
+                            mc2.player.sendMessage(Text.literal("§c§lTaun+++ >> §7AutoSell done, selling " + slugCount + " slugs..."), false);
+                            // Start the script back up, wait for it to register, then stop it and call george
+                            mc2.execute(() -> { if (mc2.player != null) mc2.player.networkHandler.sendChatMessage(".ez-startscript netherwart:1"); });
+                            Thread.sleep(2000);
+                            mc2.execute(() -> { if (mc2.player != null) mc2.player.networkHandler.sendChatMessage(".ez-stopscript"); });
+                            Thread.sleep(500);
+                            triggerGeorgeSlugSell();
+                            Thread.sleep(300);
+                            triggerBoosterCookie();
+                            mc2.execute(() -> { if (mc2.player != null) mc2.player.networkHandler.sendChatMessage(".ez-startscript netherwart:1"); });
+                        } catch (Exception e) {
+                            LOGGER.warn("[SlugSell] AutoSell-triggered sell failed: {}", e.getMessage());
+                        } finally {
+                            georgeSlugSellActive = false;
+                        }
+                    }, "taun-slug-sell-autosell").start();
+                }
             } else if (strippedText.contains("spawned in")) {
                 eqSwapPending = false;
             }
@@ -420,32 +529,8 @@ public class TaunCore implements ClientModInitializer {
             // Flag set when George's phone starts ringing — used by triggerAbiphoneGeorgeCall
             if (!georgeRingDetected && strippedText.contains("RING")) {
                 georgeRingDetected = true;
-                if (debugEnabled) MinecraftClient.getInstance().player.sendMessage(
-                    Text.literal("§c§lTaun+++ >> §7George RING detected, waiting 5s for GUI..."), false);
             }
 
-            // ── AutoSell finished → trigger pending slug sell ─────────────────
-            if (slugSellPendingAutoSell && !georgeSlugSellActive && strippedText.contains("AutoSell script stopped. [Finished]")) {
-                slugSellPendingAutoSell = false;
-                georgeSlugSellActive = true;
-                lastGeorgeSlugSellTime = System.currentTimeMillis();
-                new Thread(() -> {
-                    try {
-                        MinecraftClient mc = MinecraftClient.getInstance();
-                        if (mc.player == null) { georgeSlugSellActive = false; return; }
-                        mc.player.sendMessage(Text.literal("§b§lTaun+++ >> §bAutoSell done, now selling slugs..."), false);
-                        Thread.sleep(500);
-                        triggerGeorgeSlugSell();
-                        Thread.sleep(300);
-                        mc.execute(() -> { if (mc.player != null) mc.player.networkHandler.sendChatMessage(".ez-startscript netherwart:1"); });
-                    } catch (Exception e) {
-                        LOGGER.warn("[SlugSell] AutoSell-triggered sell failed: {}", e.getMessage());
-                    } finally {
-                        georgeSlugSellActive = false;
-                    }
-                }, "taun-slug-sell-autosell").start();
-            }
-            
             for (ChatTrigger trigger : triggers) {
                 if (trigger.matches(strippedText)) {
                     String triggerKey = trigger.getGroupKey();
@@ -870,6 +955,7 @@ public class TaunCore implements ClientModInitializer {
             triggers.clear();
             pestCdTriggers.clear();
             eqPestCdTriggers.clear();
+            eqPestCdWdTriggers.clear();
             pestAliveTriggers.clear();
             Map<String, String> variables = new HashMap<>();
             for (String line : lines) {
@@ -887,6 +973,7 @@ public class TaunCore implements ClientModInitializer {
                 if (line.startsWith("TRIGGER:")) { i = parseNewFormatTrigger(lines, i, variables); continue; }
                 if (line.equals("PestCD:") || line.startsWith("PestCD:")) { i = parsePestCdTrigger(lines, i, variables); continue; }
                 if (line.equals("EQPestCD:") || line.startsWith("EQPestCD:")) { i = parseEqPestCdTrigger(lines, i, variables); continue; }
+                if (line.equals("EQPestCDWD:") || line.startsWith("EQPestCDWD:")) { i = parseEqPestCdWdTrigger(lines, i, variables); continue; }
                 if (line.equals("EQPestCDFIN:") || line.startsWith("EQPestCDFIN:")) { i++; continue; } // removed feature, skip
                 if (line.matches("PestAlive\\d+:.*")) { i = parsePestAliveTrigger(lines, i, variables, line); continue; }
                 i = parseOldFormatTrigger(lines, i, line);
@@ -1134,7 +1221,7 @@ public class TaunCore implements ClientModInitializer {
         while (i < lines.size()) {
             String originalLine = lines.get(i).trim(); String line = originalLine;
             for (Map.Entry<String, String> var : variables.entrySet()) line = line.replace(var.getKey(), var.getValue());
-            if (line.isEmpty() || line.startsWith("TRIGGER:") || line.startsWith("PestCD:") || line.startsWith("EQPestCD:") || line.startsWith("EQPestCDFIN:") || line.startsWith("#") || line.startsWith("@")) break;
+            if (line.isEmpty() || line.startsWith("TRIGGER:") || line.startsWith("PestCD:") || line.startsWith("EQPestCD:") || line.startsWith("EQPestCDWD:") || line.startsWith("EQPestCDFIN:") || line.startsWith("#") || line.startsWith("@")) break;
             if (line.startsWith("DELAY:")) { commandDelay = parseTime(line.substring("DELAY:".length()).trim()); }
             else if (line.startsWith("BLOCK:")) {
                 String[] parts = line.substring("BLOCK:".length()).trim().split("\\s+for\\s+", 2);
@@ -1146,6 +1233,31 @@ public class TaunCore implements ClientModInitializer {
             i++;
         }
         if (!command.isEmpty() || !keybindActions.isEmpty() || !actionList.isEmpty()) eqPestCdTriggers.add(new PestCdTrigger(command, commandDelay, keybindActions, blockInputs, blockInputsDelay, blockedCommands, actionList));
+        return i;
+    }
+
+    private static int parseEqPestCdWdTrigger(List<String> lines, int startIndex, Map<String, String> variables) {
+        String command = ""; long commandDelay = 0;
+        List<ChatTrigger.KeybindAction> keybindActions = new ArrayList<>();
+        List<ChatTrigger.TriggerAction> actionList = new ArrayList<>();
+        boolean blockInputs = false; long blockInputsDelay = 0;
+        List<ChatTrigger.BlockedCommand> blockedCommands = new ArrayList<>();
+        int i = startIndex + 1;
+        while (i < lines.size()) {
+            String originalLine = lines.get(i).trim(); String line = originalLine;
+            for (Map.Entry<String, String> var : variables.entrySet()) line = line.replace(var.getKey(), var.getValue());
+            if (line.isEmpty() || line.startsWith("TRIGGER:") || line.startsWith("PestCD:") || line.startsWith("EQPestCD:") || line.startsWith("EQPestCDWD:") || line.startsWith("EQPestCDFIN:") || line.startsWith("#") || line.startsWith("@")) break;
+            if (line.startsWith("DELAY:")) { commandDelay = parseTime(line.substring("DELAY:".length()).trim()); }
+            else if (line.startsWith("BLOCK:")) {
+                String[] parts = line.substring("BLOCK:".length()).trim().split("\\s+for\\s+", 2);
+                if (parts.length == 2) { String cmd = parts[0].trim(); if (cmd.startsWith("/")) cmd = cmd.substring(1); blockedCommands.add(new ChatTrigger.BlockedCommand(cmd, (int)(parseTime(parts[1].trim()) / 1000))); }
+            } else {
+                Object[] out = new Object[]{command, commandDelay, blockInputs, blockInputsDelay};
+                if (parseActionLine(line, originalLine, actionList, keybindActions, out)) { command = (String) out[0]; commandDelay = (Long) out[1]; blockInputs = (Boolean) out[2]; blockInputsDelay = (Long) out[3]; }
+            }
+            i++;
+        }
+        if (!command.isEmpty() || !keybindActions.isEmpty() || !actionList.isEmpty()) eqPestCdWdTriggers.add(new PestCdTrigger(command, commandDelay, keybindActions, blockInputs, blockInputsDelay, blockedCommands, actionList));
         return i;
     }
 
@@ -1318,6 +1430,7 @@ public class TaunCore implements ClientModInitializer {
         if (blockInputs) blockingInputs = true;
         try {
             boolean skipToJacobTrue = false;
+            boolean skipGuiDueToCropFever = false;
             for (ChatTrigger.TriggerAction action : actions) {
                 if (skipToJacobTrue && action.type != ChatTrigger.TriggerAction.Type.IFJACOB_TRUE) continue;
                 if (action.delayMs > 0) Thread.sleep(applyRandomDelay(action.delayMs));
@@ -1371,7 +1484,7 @@ public class TaunCore implements ClientModInitializer {
                         }
                     }
                     case IFCROPFEVER_SKIP_GUI -> {
-                        // handled at trigger execution level via cropFeverActive flag — no-op here
+                        if (cropFeverActive) skipGuiDueToCropFever = true;
                     }
                     case RETRYUNTILSKYBLOCK -> {
                         MinecraftClient mc = MinecraftClient.getInstance();
@@ -1396,7 +1509,9 @@ public class TaunCore implements ClientModInitializer {
                         if (!inSkyblock) LOGGER.warn("[ShutdownSafety] Failed to join SkyBlock after 10 attempts");
                     }
                     case WAITONGUIOPEN -> {
-                        try { waitForGuiOpenThenClose(action.delayMs); } catch (GuiOpenTimeoutException e) { return; }
+                        if (!skipGuiDueToCropFever) {
+                            try { waitForGuiOpenThenClose(action.delayMs); } catch (GuiOpenTimeoutException e) { return; }
+                        }
                     }
                 }
             }
@@ -1906,6 +2021,14 @@ public class TaunCore implements ClientModInitializer {
         client.player.sendMessage(Text.literal("§c§lTaun+++ >> §7George slug sell: " + (georgeSlugSellEnabled ? "§aENABLED" : "§cDISABLED")), false);
     }
 
+    public static void toggleExtraSell() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) return;
+        boosterCookieEnabled = !boosterCookieEnabled;
+        saveSettings();
+        client.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Extra sell (overclocker etc): " + (boosterCookieEnabled ? "§aENABLED" : "§cDISABLED")), false);
+    }
+
     public static void setRotateSpeed(long ms) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return;
@@ -2027,6 +2150,14 @@ public class TaunCore implements ClientModInitializer {
                 lastEqSwapFireTime = System.currentTimeMillis();
                 if (isFarming) for (PestCdTrigger t : eqPestCdTriggers) firePestCdTrigger(t);
                 else { eqSwapPending = true; if (debugEnabled) client.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Queuing EQSwap..."), false); }
+            }
+        }
+        if (!eqPestCdWdTriggers.isEmpty() && cdText != null && !ready && !inGrace) {
+            int sec = parseCooldownSeconds(cdText);
+            if (sec >= 170 && sec <= 180 && (System.currentTimeMillis() - lastEqSwapFireTime) > EQ_SWAP_COOLDOWN_MS) {
+                lastEqSwapFireTime = System.currentTimeMillis();
+                if (isFarming) for (PestCdTrigger t : eqPestCdWdTriggers) firePestCdTrigger(t);
+                else { eqSwapPending = true; if (debugEnabled) client.player.sendMessage(Text.literal("§c§lTaun+++ >> §7Queuing WD EQSwap..."), false); }
             }
         }
         long now = System.currentTimeMillis();
@@ -2756,8 +2887,8 @@ public class TaunCore implements ClientModInitializer {
                 }
                 case "wdswap" -> {
                     t.append("# wardrobe swap config\n");
-                    if (eqSwapEnabled) { t.append("EQPestCD:\n  COMMAND: .ez-stopscript\n  EQSWAP: PEST\n  COMMAND: .ez-startscript netherwart:1 after 100ms\n\n"); }
-                    t.append("TRIGGER: \"spawned in\"\n  IFCROPFEVER: SKIP_GUI\n  WAITONGUIOPEN\n  COMMAND: /setspawn\n  COMMAND: .ez-stopscript\n");
+                    t.append("EQPestCDWD:\n  COMMAND: .ez-stopscript\n  EQSWAP: PEST\n  COMMAND: .ez-startscript netherwart:1 after 100ms\n\n");
+                    t.append("TRIGGER: \"spawned in\"\n  WAITFORCHAT: \"script stopped. [Pests]\"\n  COMMAND: /setspawn\n  IFCROPFEVER: SKIP_GUI\n  WAITONGUIOPEN\n  COMMAND: .ez-stopscript\n");
                     if (eqSwapEnabled) t.append("  EQSWAP: BLOSSOM/LOTUS\n");
                     if (etherwarpEnabled) t.append(buildEtherwarpLine());
                     t.append("  COMMAND: .ez-startscript misc:pestCleaner\n\nTRIGGER: \"Pest Cleaner script stopped. [Finished]\"\n  COMMAND: /warp garden\n  HOLD: shift for 350ms\n  COMMAND: .ez-startscript netherwart:1\n");
@@ -2800,12 +2931,12 @@ public class TaunCore implements ClientModInitializer {
                 }
                 continue;
             }
-            boolean isPestBlock = line.startsWith("PestCD:") || line.startsWith("EQPestCD:") || line.startsWith("EQPestCDFIN:") || line.matches("PestAlive\\d+:.*")
+            boolean isPestBlock = line.startsWith("PestCD:") || line.startsWith("EQPestCD:") || line.startsWith("EQPestCDWD:") || line.startsWith("EQPestCDFIN:") || line.matches("PestAlive\\d+:.*")
                 || (line.startsWith("TRIGGER:") && (line.contains("Pest Cleaner script stopped") || line.contains("Wardrobe Swap script stopped") || line.contains("spawned in") || line.contains("server will restart soon") || line.contains("proxy is")))
                 || line.equals("# server shutdown safety (dont change unless buggy)");
             if (isPestBlock) {
                 i++;
-                while (i < lines.length) { String l = lines[i].trim(); if (l.startsWith("TRIGGER:") || l.startsWith("PestCD:") || l.startsWith("EQPestCD:") || l.startsWith("EQPestCDFIN:") || l.matches("PestAlive\\d+:.*") || l.startsWith("#")) break; i++; }
+                while (i < lines.length) { String l = lines[i].trim(); if (l.startsWith("TRIGGER:") || l.startsWith("PestCD:") || l.startsWith("EQPestCD:") || l.startsWith("EQPestCDWD:") || l.startsWith("EQPestCDFIN:") || l.matches("PestAlive\\d+:.*") || l.startsWith("#")) break; i++; }
             } else { out.append(lines[i]).append("\n"); i++; }
         }
         return out.toString();
@@ -2945,6 +3076,7 @@ public class TaunCore implements ClientModInitializer {
         client.player.sendMessage(Text.literal("§e/pest dynarest breaktime <m> / scriptoffset <m> / status"), false);
         client.player.sendMessage(Text.literal("§e/pest abiphoneslot <1-9>   §7Set Abiphone hotbar slot (George sell)"), false);
         client.player.sendMessage(Text.literal("§e/pest georgesell   §7Toggle George slug auto-sell on/off"), false);
+        client.player.sendMessage(Text.literal("§e/pest extrasell   §7Toggle overclocker/extra item sell via booster cookie GUI"), false);
         client.player.sendMessage(Text.literal("§e/pest random <ms> §8— randomize all delays in triggers.txt by ±<ms>"), false);
         client.player.sendMessage(Text.literal("§e/pest reload / detect / files / debug / help"), false);
         client.player.sendMessage(Text.literal("§c§l====================================="), false);

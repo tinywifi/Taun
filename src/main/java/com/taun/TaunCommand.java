@@ -131,6 +131,9 @@ public class TaunCommand {
                     .then(ClientCommandManager.literal("help")
                         .executes(ctx -> { TaunCore.showHelp(); return 1; })
                     )
+                    .then(ClientCommandManager.literal("extrasell")
+                        .executes(ctx -> { TaunCore.toggleExtraSell(); return 1; })
+                    )
             );
         });
     }
